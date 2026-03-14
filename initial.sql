@@ -140,11 +140,99 @@ CREATE TABLE IF NOT EXISTS processed_files (
 );
 
 -- ============================================================================
--- Indexes
+-- SCRIPT DE ÍNDICES - BASE CNPJ
 -- ============================================================================
 
+-- Extensão necessária
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- ============================================================================
+-- FUNÇÃO AUXILIAR
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION immutable_unaccent(text)
+RETURNS text AS $$
+  SELECT public.unaccent($1)
+$$ LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT;
+
+-- ============================================================================
+-- TABELA: empresas
+-- ============================================================================
+
+-- PK
+-- CREATE UNIQUE INDEX empresas_pkey ON empresas USING btree (cnpj_basico);
+
+-- Índice para ORDER BY razao_social com JOIN
+CREATE INDEX IF NOT EXISTS idx_emp_razao_social 
+ON empresas USING btree (cnpj_basico, razao_social);
+
+-- ============================================================================
+-- TABELA: estabelecimentos
+-- ============================================================================
+
+-- PK
+-- CREATE UNIQUE INDEX estabelecimentos_pkey ON estabelecimentos USING btree (cnpj_basico, cnpj_ordem, cnpj_dv);
+
+-- Índices originais (mantidos para compatibilidade)
 CREATE INDEX IF NOT EXISTS idx_estabelecimentos_uf ON estabelecimentos(uf);
 CREATE INDEX IF NOT EXISTS idx_estabelecimentos_municipio ON estabelecimentos(municipio);
 CREATE INDEX IF NOT EXISTS idx_estabelecimentos_situacao ON estabelecimentos(situacao_cadastral);
 CREATE INDEX IF NOT EXISTS idx_estabelecimentos_cnae ON estabelecimentos(cnae_fiscal_principal);
+
+-- Coluna computada para array de CNAEs secundários
+ALTER TABLE estabelecimentos 
+ADD COLUMN IF NOT EXISTS cnae_secundario_arr integer[] 
+GENERATED ALWAYS AS (
+  CASE 
+    WHEN cnae_fiscal_secundaria IS NOT NULL AND cnae_fiscal_secundaria <> '' 
+    THEN string_to_array(cnae_fiscal_secundaria, ',')::integer[]
+    ELSE NULL 
+  END
+) STORED;
+
+-- JOIN com empresas (ativas, com colunas para ORDER BY)
+CREATE INDEX IF NOT EXISTS idx_estabelecimentos_cnpj_basico_ativas 
+ON estabelecimentos (cnpj_basico, identificador_matriz_filial, cnpj_ordem) 
+WHERE situacao_cadastral = '02';
+
+-- Filtro por UF + CNAE principal (cenário mais comum)
+CREATE INDEX IF NOT EXISTS idx_estabelecimentos_uf_cnae_ativas 
+ON estabelecimentos (uf, cnae_fiscal_principal) 
+WHERE situacao_cadastral = '02';
+
+-- Filtro por UF + município
+CREATE INDEX IF NOT EXISTS idx_est_uf_municipio_ativas 
+ON estabelecimentos (uf, municipio) 
+WHERE situacao_cadastral = '02';
+
+-- Filtro apenas por CNAE principal
+CREATE INDEX IF NOT EXISTS idx_estabelecimentos_cnae_principal_ativas 
+ON estabelecimentos (cnae_fiscal_principal) 
+WHERE situacao_cadastral = '02';
+
+-- Filtro apenas por município
+CREATE INDEX IF NOT EXISTS idx_estabelecimentos_municipio_ativas 
+ON estabelecimentos (municipio) 
+WHERE situacao_cadastral = '02';
+
+-- GIN para busca em CNAEs secundários (overlap &&)
+CREATE INDEX IF NOT EXISTS idx_estabelecimentos_cnae_secundario_arr_gin 
+ON estabelecimentos USING GIN (cnae_secundario_arr) 
+WHERE situacao_cadastral = '02' AND cnae_secundario_arr IS NOT NULL;
+
+-- ============================================================================
+-- TABELA: municipios
+-- ============================================================================
+
+-- PK
+-- CREATE UNIQUE INDEX municipios_pkey ON municipios USING btree (codigo);
+
+-- Busca por nome (case-insensitive, sem acentos)
+CREATE INDEX IF NOT EXISTS idx_municipios_upper_unaccent 
+ON municipios USING btree (UPPER(immutable_unaccent(descricao)));
+
+-- ============================================================================
+-- TABELA: socios
+-- ============================================================================
+
 CREATE INDEX IF NOT EXISTS idx_socios_cnpj_basico ON socios(cnpj_basico);
